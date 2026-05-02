@@ -150,7 +150,13 @@ Pinyin rules:
       }
       const data = await res.json();
       const raw = data.candidates?.[0]?.content?.parts?.find(p => p.text)?.text || "";
-      return JSON.parse(raw.replace(/```json|```/g, "").trim());
+      console.log("[callGemini] raw response:", raw);
+      const jsonStr = (raw.match(/\{[\s\S]*\}/) || [])[0] ?? "";
+      try {
+        return JSON.parse(jsonStr);
+      } catch (e) {
+        throw new Error(`${e.message} — raw: ${raw}`);
+      }
     }
 
     // ── Constants ───────────────────────────────────────────────────────────────
