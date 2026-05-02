@@ -81,6 +81,9 @@
       { type:"en", text:"Umm, err..." },
     ];
 
+    // Pitch targets for tone-mangled speech (same scale as main response)
+    const TONE_PITCH = { 1:1.7, 2:1.2, 3:0.4, 4:0.75, 0:1.0 };
+
     function buildFillerUtterance() {
       const f = FILLER_POOL[Math.floor(Math.random() * FILLER_POOL.length)];
       if (f.type === "en") {
@@ -88,10 +91,16 @@
         u.lang = "en-US"; u.rate = 0.8; u.pitch = 0.95;
         return u;
       }
-      const scrambled = f.syllables.map(s => ({ ...s, newTone: scrambleTone(s.tone) }));
-      const pinyin = scrambled.map(s => applyTone(s.pinyin_base, s.newTone)).join(" ") + f.suffix;
-      const u = new SpeechSynthesisUtterance(pinyin);
-      u.lang = "zh-CN"; u.rate = 0.72; u.pitch = 1.05;
+      // For zh fillers, speak the actual character (那 / 个) with wrong pitch —
+      // same approach as main response. Pick the first syllable's character.
+      // 那 = character for na, 个 = character for ge
+      const ZH_FILLER_CHARS = { na:"那", ge:"个" };
+      const syllable = f.syllables[Math.floor(Math.random() * f.syllables.length)];
+      const wrongTone = scrambleTone(syllable.tone);
+      const char = ZH_FILLER_CHARS[syllable.pinyin_base] || "那";
+      const u = new SpeechSynthesisUtterance(char + "…");
+      u.lang = "zh-CN"; u.rate = 0.7;
+      u.pitch = TONE_PITCH[wrongTone] ?? 1.0;
       const voices = window.speechSynthesis.getVoices();
       const zh = voices.find(v => v.lang.startsWith("zh"));
       if (zh) u.voice = zh;
@@ -244,17 +253,38 @@ Pinyin rules:
           }]);
           setStatus("speaking");
 
-          const utt = new SpeechSynthesisUtterance(mangledPinyin);
-          utt.lang = "zh-CN";
-          utt.rate = 0.82;
+          // Speak characters one-by-one with pitch mapped to scrambled tone.
+          // zh-CN TTS reads characters correctly (intelligible syllables) but
+          // at the wrong pitch contour — sounds like a foreigner who knows words
+          // but can't do tones, rather than a washing machine.
+          // Tone pitch targets (0–2 scale, default 1):
+          //   1 flat-high → 1.7  |  2 rising → 1.2  |  3 low-dip → 0.4  |  4 falling → 0.75
+          const TONE_PITCH = { 1:1.7, 2:1.2, 3:0.4, 4:0.75, 0:1.0 };
+
           const voices = window.speechSynthesis.getVoices();
-          const zh = voices.find(v => v.lang.startsWith("zh"));
-          if (zh) utt.voice = zh;
-          utt.onend = () => {
-            setStatus(listeningRef.current ? "listening" : "idle");
-            processingLock.current = false;
-          };
-          window.speechSynthesis.speak(utt);
+          const zhVoice = voices.find(v => v.lang.startsWith("zh")) || null;
+
+          // Build list of speakable tokens: only syllable-bearing chars
+          const tokens = data.syllables.filter(s => s.pinyin_base && s.char.trim());
+          const scrambledForSpeech = scrambled.filter(s => s.pinyin_base && s.char.trim());
+
+          function speakToken(idx) {
+            if (idx >= scrambledForSpeech.length) {
+              setStatus(listeningRef.current ? "listening" : "idle");
+              processingLock.current = false;
+              return;
+            }
+            const s = scrambledForSpeech[idx];
+            const u = new SpeechSynthesisUtterance(s.char);
+            u.lang = "zh-CN";
+            u.rate = 0.78;
+            u.pitch = TONE_PITCH[s.newTone] ?? 1.0;
+            if (zhVoice) u.voice = zhVoice;
+            u.onend = () => speakToken(idx + 1);
+            window.speechSynthesis.speak(u);
+          }
+
+          speakToken(0);
 
         } catch(e) {
           stopFillers();
