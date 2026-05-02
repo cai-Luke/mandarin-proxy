@@ -91,19 +91,16 @@
         u.lang = "en-US"; u.rate = 0.8; u.pitch = 0.95;
         return u;
       }
-      // For zh fillers, speak the actual character (那 / 个) with wrong pitch —
-      // same approach as main response. Pick the first syllable's character.
-      // 那 = character for na, 个 = character for ge
-      const ZH_FILLER_CHARS = { na:"那", ge:"个" };
+      // Same approach as main response: English voice reads raw pinyin
+      // so "na" sounds like "nah" and "ge" sounds like "jee" or "guh"
       const syllable = f.syllables[Math.floor(Math.random() * f.syllables.length)];
       const wrongTone = scrambleTone(syllable.tone);
-      const char = ZH_FILLER_CHARS[syllable.pinyin_base] || "那";
-      const u = new SpeechSynthesisUtterance(char + "…");
-      u.lang = "zh-CN"; u.rate = 0.7;
+      const u = new SpeechSynthesisUtterance(syllable.pinyin_base);
+      u.lang = "en-US"; u.rate = 0.8;
       u.pitch = TONE_PITCH[wrongTone] ?? 1.0;
       const voices = window.speechSynthesis.getVoices();
-      const zh = voices.find(v => v.lang.startsWith("zh"));
-      if (zh) u.voice = zh;
+      const enV = voices.find(v => v.lang.startsWith("en-US")) || voices.find(v => v.lang.startsWith("en"));
+      if (enV) u.voice = enV;
       return u;
     }
 
@@ -268,6 +265,8 @@ Pinyin rules:
           const tokens = data.syllables.filter(s => s.pinyin_base && s.char.trim());
           const scrambledForSpeech = scrambled.filter(s => s.pinyin_base && s.char.trim());
 
+          const enVoice = voices.find(v => v.lang.startsWith("en-US")) || voices.find(v => v.lang.startsWith("en")) || null;
+
           function speakToken(idx) {
             if (idx >= scrambledForSpeech.length) {
               setStatus(listeningRef.current ? "listening" : "idle");
@@ -275,11 +274,13 @@ Pinyin rules:
               return;
             }
             const s = scrambledForSpeech[idx];
-            const u = new SpeechSynthesisUtterance(s.char);
-            u.lang = "zh-CN";
-            u.rate = 0.78;
+            // English voice + raw pinyin = aggressive vowel/consonant butchering
+            // with unearned confidence. "qing" → "kwing", "zhe" → "zee".
+            const u = new SpeechSynthesisUtterance(s.pinyin_base);
+            u.lang = "en-US";
+            u.rate = 0.9;
             u.pitch = TONE_PITCH[s.newTone] ?? 1.0;
-            if (zhVoice) u.voice = zhVoice;
+            if (enVoice) u.voice = enVoice;
             u.onend = () => speakToken(idx + 1);
             window.speechSynthesis.speak(u);
           }
