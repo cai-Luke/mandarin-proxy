@@ -91,11 +91,9 @@
         u.lang = "en-US"; u.rate = 0.8; u.pitch = 0.95;
         return u;
       }
-      // Same approach as main response: English voice reads raw pinyin
-      // so "na" sounds like "nah" and "ge" sounds like "jee" or "guh"
-      const syllable = f.syllables[Math.floor(Math.random() * f.syllables.length)];
-      const wrongTone = scrambleTone(syllable.tone);
-      const u = new SpeechSynthesisUtterance(syllable.pinyin_base);
+      const fillerText = f.syllables.map(s => s.pinyin_base).join(" ");
+      const wrongTone = scrambleTone(4);
+      const u = new SpeechSynthesisUtterance(fillerText);
       u.lang = "en-US"; u.rate = 0.8;
       u.pitch = TONE_PITCH[wrongTone] ?? 1.0;
       const voices = window.speechSynthesis.getVoices();
