@@ -139,6 +139,7 @@ Pinyin rules:
             generationConfig: {
               temperature: 1.0,
               maxOutputTokens: 1000,
+              responseMimeType: "application/json",
               thinkingConfig: { thinkingLevel: "LOW" },
             },
           }),
@@ -149,13 +150,12 @@ Pinyin rules:
         throw new Error(err?.error?.message || `Gemini HTTP ${res.status}`);
       }
       const data = await res.json();
-      const raw = data.candidates?.[0]?.content?.parts?.find(p => p.text)?.text || "";
+      const raw = data.candidates?.[0]?.content?.parts?.find(p => p.text)?.text || "{}";
       console.log("[callGemini] raw response:", raw);
-      const jsonStr = (raw.match(/\{[\s\S]*\}/) || [])[0] ?? "";
       try {
-        return JSON.parse(jsonStr);
+        return JSON.parse(raw);
       } catch (e) {
-        throw new Error(`${e.message} — raw: ${raw}`);
+        throw new Error(`JSON Parse Error: ${e.message} — raw: ${raw}`);
       }
     }
 
