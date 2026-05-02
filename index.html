@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mandarin Proxy</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Noto+Sans+SC:wght@300;500&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body, #root { height: 100%; }
+    body { background: #07080f; color: #e2e8f0; font-family: 'Courier New', Courier, monospace; }
+    input:focus { outline: none; }
+    ::-webkit-scrollbar { width: 4px; height: 4px; }
+    ::-webkit-scrollbar-track { background: #0f1117; }
+    ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 2px; }
+    @keyframes breathe { 0%,100%{opacity:1;} 50%{opacity:0.35;} }
+    @keyframes fadeUp { from{opacity:0;transform:translateY(10px);} to{opacity:1;transform:translateY(0);} }
+    .fade { animation: fadeUp 0.35s ease both; }
+    .chip:hover { filter: brightness(1.4); }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useRef, useCallback } = React;
+
+    // ── Tone machinery ──────────────────────────────────────────────────────────
+    const MARKS = {
+      a: ["ā","á","ǎ","à","a"], e: ["ē","é","ě","è","e"],
+      i: ["ī","í","ǐ","ì","i"], o: ["ō","ó","ǒ","ò","o"],
+      u: ["ū","ú","ǔ","ù","u"], ü: ["ǖ","ǘ","ǚ","ǜ","ü"],
+    };
+
+    function applyTone(base, tone) {
+      if (!base || tone === 0) return base;
+      const idx = tone - 1;
+      const b = base.replace(/v/g, "ü");
+      if (b.includes("a")) return b.replace("a", MARKS.a[idx]);
+      if (b.includes("e")) return b.replace("e", MARKS.e[idx]);
+      if (b.includes("ou")) return b.replace("o", MARKS.o[idx]);
+      for (let i = b.length - 1; i >= 0; i--) {
+        const ch = b[i];
+        if (MARKS[ch]) return b.slice(0,i) + MARKS[ch][idx] + b.slice(i+1);
+      }
+      return b;
+    }
+
+    function scrambleTone(original) {
+      const pool = [1,2,3,4].filter(t => t !== original);
+      return pool[Math.floor(Math.random() * pool.length)];
+    }
+
+    function scrambleSyllables(syllables) {
+      return syllables.map(s => ({
+        ...s,
+        newTone: s.tone === 0
+          ? Math.ceil(Math.random() * 4)
+          : scrambleTone(s.tone),
+      }));
+    }
+
+    function toMangledPinyin(scrambled) {
+      return scrambled
+        .filter(s => s.pinyin_base)
+        .map(s => applyTone(s.pinyin_base, s.newTone))
+        .join(" ");
+    }
+
+    // ── Fillers ─────────────────────────────────────────────────────────────────
+    const FILLER_POOL = [
+      { type:"zh", syllables:[{pinyin_base:"na",tone:4},{pinyin_base:"ge",tone:4}], suffix:"..." },
+      { type:"zh", syllables:[{pinyin_base:"na",tone:4}], suffix:"...  " },
+      { type:"zh", syllables:[{pinyin_base:"na",tone:4},{pinyin_base:"na",tone:4},{pinyin_base:"ge",tone:4}], suffix:"..." },
+      { type:"en", text:"Umm..." },
+      { type:"en", text:"Err..." },
+      { type:"en", text:"Umm, err..." },
+    ];
+
+    function buildFillerUtterance() {
+      const f = FILLER_POOL[Math.floor(Math.random() * FILLER_POOL.length)];
+      if (f.type === "en") {
+        const u = new SpeechSynthesisUtterance(f.text);
+        u.lang = "en-US"; u.rate = 0.8; u.pitch = 0.95;
+        return u;
+      }
+      const scrambled = f.syllables.map(s => ({ ...s, newTone: scrambleTone(s.tone) }));
+      const pinyin = scrambled.map(s => applyTone(s.pinyin_base, s.newTone)).join(" ") + f.suffix;
+      const u = new SpeechSynthesisUtterance(pinyin);
+      u.lang = "zh-CN"; u.rate = 0.72; u.pitch = 1.05;
+      const voices = window.speechSynthesis.getVoices();
+      const zh = voices.find(v => v.lang.startsWith("zh"));
+      if (zh) u.voice = zh;
+      return u;
+    }
+
+    // ── Gemini ──────────────────────────────────────────────────────────────────
+    async function callGemini(apiKey, mandarin) {
+      const systemPrompt = `You are a Mandarin conversation assistant. Given something said in Mandarin Chinese, you will:
+1. Translate what was said to English
+2. Craft a short, natural Mandarin response (1-3 sentences, conversational)
+3. Provide a full syllable-by-syllable pinyin breakdown of your response
+
+Return ONLY valid JSON, no markdown fences, no explanation:
+{
+  "heard_english": "English translation of the input",
+  "intended_english": "English translation of your Mandarin response",
+  "characters": "your response as Chinese characters",
+  "syllables": [
+    {"char": "你", "pinyin_base": "ni", "tone": 3},
+    {"char": "好", "pinyin_base": "hao", "tone": 3}
+  ]
+}
+
+Pinyin rules:
+- pinyin_base: bare syllable, no tone marks, all lowercase. Use v for ü.
+- tone: integer 1-4 for tonal syllables, 0 for neutral/toneless (的 了 吗 etc.)
+- One entry per character. For punctuation: {"char":"，","pinyin_base":"","tone":0}
+- Do not skip any character.`;
+
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            contents: [{ role: "user", parts: [{ text: mandarin }] }],
+            generationConfig: {
+              temperature: 1.0,
+              maxOutputTokens: 1000,
+              thinkingConfig: { thinkingLevel: "LOW" },
+            },
+          }),
+        }
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error?.message || `Gemini HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const raw = data.candidates?.[0]?.content?.parts?.find(p => p.text)?.text || "";
+      return JSON.parse(raw.replace(/```json|```/g, "").trim());
+    }
+
+    // ── Constants ───────────────────────────────────────────────────────────────
+    const STATUS = {
+      idle:       { color:"#334155", label:"— STANDBY —" },
+      listening:  { color:"#22c55e", label:"● LISTENING FOR MANDARIN..." },
+      processing: { color:"#f59e0b", label:"⟳ CONSULTING GEMINI... STALLING..." },
+      speaking:   { color:"#f87171", label:"🔊 PLAYING MANGLED RESPONSE" },
+      error:      { color:"#ef4444", label:"✕ ERROR — CHECK API KEY OR MIC" },
+    };
+
+    const TONE_COLORS = { 1:"#38bdf8", 2:"#4ade80", 3:"#facc15", 4:"#f87171", 0:"#64748b" };
+    const TONE_NAMES  = ["","1st flat","2nd rising","3rd dip","4th falling"];
+
+    // ── App ─────────────────────────────────────────────────────────────────────
+    function MandarinProxy() {
+      const [apiKey,     setApiKey]   = useState(() => sessionStorage.getItem("mp_gk") || "");
+      const [keyDraft,   setKeyDraft] = useState("");
+      const [listening,  setListening]  = useState(false);
+      const [status,     setStatus]   = useState("idle");
+      const [heard,      setHeard]    = useState(null);
+      const [reply,      setReply]    = useState(null);
+      const [errMsg,     setErrMsg]   = useState("");
+      const [history,    setHistory]  = useState([]);
+
+      const recRef         = useRef(null);
+      const fillerTimer    = useRef(null);
+      const cancelFiller   = useRef(false);
+      const processingLock = useRef(false);
+      const listeningRef   = useRef(false); // stable ref for use inside callbacks
+
+      // ── Key management ────────────────────────────────────────────────────────
+      function saveKey() {
+        const k = keyDraft.trim();
+        if (!k) return;
+        sessionStorage.setItem("mp_gk", k);
+        setApiKey(k);
+        setKeyDraft("");
+      }
+
+      function clearKey() {
+        sessionStorage.removeItem("mp_gk");
+        setApiKey("");
+        setKeyDraft("");
+      }
+
+      // ── Filler loop ───────────────────────────────────────────────────────────
+      function scheduleFiller() {
+        if (cancelFiller.current) return;
+        const delay = 1600 + Math.random() * 1700;
+        fillerTimer.current = setTimeout(() => {
+          if (cancelFiller.current) return;
+          const utt = buildFillerUtterance();
+          utt.onend = () => { if (!cancelFiller.current) scheduleFiller(); };
+          window.speechSynthesis.speak(utt);
+        }, delay);
+      }
+
+      function stopFillers() {
+        cancelFiller.current = true;
+        clearTimeout(fillerTimer.current);
+        window.speechSynthesis.cancel();
+      }
+
+      // ── Pipeline ──────────────────────────────────────────────────────────────
+      const handleRecognized = useCallback(async (mandarin) => {
+        if (processingLock.current || !mandarin.trim()) return;
+        processingLock.current = true;
+
+        setStatus("processing");
+        setHeard({ mandarin, english: "translating…" });
+        setReply(null);
+        setErrMsg("");
+
+        cancelFiller.current = false;
+        scheduleFiller();
+
+        try {
+          const data = await callGemini(apiKey, mandarin);
+          const scrambled = scrambleSyllables(data.syllables);
+          const mangledPinyin = toMangledPinyin(scrambled);
+
+          stopFillers();
+
+          const replyObj = {
+            intended_english: data.intended_english,
+            characters: data.characters,
+            scrambled,
+            mangledPinyin,
+          };
+
+          setHeard({ mandarin, english: data.heard_english });
+          setReply(replyObj);
+          setHistory(h => [...h.slice(-9), {
+            heard: { mandarin, english: data.heard_english },
+            reply: replyObj,
+          }]);
+          setStatus("speaking");
+
+          const utt = new SpeechSynthesisUtterance(mangledPinyin);
+          utt.lang = "zh-CN";
+          utt.rate = 0.82;
+          const voices = window.speechSynthesis.getVoices();
+          const zh = voices.find(v => v.lang.startsWith("zh"));
+          if (zh) utt.voice = zh;
+          utt.onend = () => {
+            setStatus(listeningRef.current ? "listening" : "idle");
+            processingLock.current = false;
+          };
+          window.speechSynthesis.speak(utt);
+
+        } catch(e) {
+          stopFillers();
+          setErrMsg(e.message);
+          setStatus("error");
+          processingLock.current = false;
+        }
+      }, [apiKey]);
+
+      // ── Recognition ───────────────────────────────────────────────────────────
+      function startListening() {
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SR) { setErrMsg("SpeechRecognition not supported — try Chrome or Edge"); return; }
+
+        const rec = new SR();
+        rec.lang = "zh-CN";
+        rec.continuous = true;
+        rec.interimResults = false;
+        rec.maxAlternatives = 1;
+
+        rec.onresult = (e) => {
+          const last = e.results[e.results.length - 1];
+          if (last.isFinal) handleRecognized(last[0].transcript);
+        };
+        rec.onerror = (e) => {
+          if (e.error === "no-speech") return;
+          setListening(false);
+          listeningRef.current = false;
+          setStatus("error");
+          setErrMsg(`Recognition error: ${e.error}`);
+        };
+        rec.onend = () => {
+          if (listeningRef.current) rec.start(); // auto-restart on silence timeout
+        };
+
+        rec.start();
+        recRef.current = rec;
+        listeningRef.current = true;
+        setListening(true);
+        setStatus("listening");
+      }
+
+      function stopListening() {
+        listeningRef.current = false;
+        if (recRef.current) { recRef.current.onend = null; recRef.current.stop(); recRef.current = null; }
+        stopFillers();
+        setListening(false);
+        setStatus("idle");
+        processingLock.current = false;
+      }
+
+      const st = STATUS[status] || STATUS.idle;
+
+      // ── Render ────────────────────────────────────────────────────────────────
+      return (
+        <div style={{
+          minHeight: "100vh",
+          background: "#07080f",
+          display: "flex",
+          flexDirection: "column",
+        }}>
+
+          {/* Top bar */}
+          <div style={{
+            display: "flex", alignItems: "center", gap: "1rem",
+            padding: "0.9rem 1.5rem",
+            borderBottom: "1px solid #0f1520",
+            flexWrap: "wrap",
+          }}>
+            <h1 style={{
+              fontFamily: "'Bebas Neue', sans-serif",
+              fontSize: "1.6rem", letterSpacing: "0.12em",
+              color: "#f87171", flexShrink: 0,
+            }}>
+              MANDARIN PROXY
+            </h1>
+
+            <div style={{
+              fontSize: "0.65rem", letterSpacing: "0.18em",
+              color: st.color,
+              animation: status === "listening" ? "breathe 2.2s ease infinite" : "none",
+            }}>
+              {st.label}
+            </div>
+
+            {errMsg && (
+              <div style={{ fontSize:"0.7rem", color:"#ef4444" }}>{errMsg}</div>
+            )}
+
+            <div style={{ marginLeft:"auto", display:"flex", gap:"0.5rem", alignItems:"center", flexWrap:"wrap" }}>
+              {!apiKey ? (
+                <>
+                  <input
+                    type="password"
+                    placeholder="Gemini API key…"
+                    value={keyDraft}
+                    onChange={e => setKeyDraft(e.target.value)}
+                    onKeyDown={e => e.key === "Enter" && saveKey()}
+                    style={{
+                      background:"#0d1117", border:"1px solid #1e293b", borderRadius:"6px",
+                      color:"#e2e8f0", padding:"0.45rem 0.75rem",
+                      fontFamily:"'Courier New', monospace", fontSize:"0.8rem", width:230,
+                      transition:"border-color 0.15s",
+                    }}
+                  />
+                  <button onClick={saveKey} style={{
+                    background:"#1e3a5f", border:"none", borderRadius:"6px",
+                    color:"#93c5fd", padding:"0.45rem 0.9rem",
+                    cursor:"pointer", fontFamily:"'Courier New', monospace", fontSize:"0.8rem",
+                  }}>Connect</button>
+                </>
+              ) : (
+                <>
+                  <span style={{ fontSize:"0.65rem", color:"#16a34a", letterSpacing:"0.1em" }}>● GEMINI READY</span>
+                  <button onClick={clearKey} style={{
+                    background:"none", border:"1px solid #1e293b", borderRadius:"5px",
+                    color:"#475569", padding:"0.3rem 0.6rem",
+                    cursor:"pointer", fontFamily:"'Courier New', monospace", fontSize:"0.65rem",
+                  }}>clear key</button>
+                </>
+              )}
+
+              <button
+                onClick={listening ? stopListening : startListening}
+                disabled={!apiKey}
+                style={{
+                  padding: "0.5rem 1.4rem",
+                  background: listening ? "#1a0a0a" : "#0a1a0f",
+                  border: `1.5px solid ${listening ? "#ef4444" : "#16a34a"}`,
+                  borderRadius: "7px",
+                  color: listening ? "#ef4444" : "#4ade80",
+                  fontFamily: "'Bebas Neue', sans-serif",
+                  fontSize: "1.1rem", letterSpacing: "0.12em",
+                  cursor: apiKey ? "pointer" : "not-allowed",
+                  opacity: apiKey ? 1 : 0.4,
+                  transition: "all 0.15s",
+                  animation: status === "listening" ? "breathe 2.2s ease infinite" : "none",
+                }}
+              >
+                {listening ? "⏹ STOP" : "⏺ LISTEN"}
+              </button>
+            </div>
+          </div>
+
+          {/* Main panels */}
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr",
+            flex: 1,
+            minHeight: 320,
+          }}>
+            {/* THEY SAID */}
+            <div style={{
+              padding: "1.5rem",
+              borderRight: "1px solid #0f1520",
+              display: "flex", flexDirection: "column", gap: "0.75rem",
+            }}>
+              <div style={{ fontSize:"0.6rem", letterSpacing:"0.2em", color:"#3b82f6" }}>
+                🎙 THEY SAID
+              </div>
+              {heard ? (
+                <div className="fade" key={heard.mandarin}>
+                  <div style={{
+                    fontFamily: "'Noto Sans SC', sans-serif",
+                    fontSize: "2rem", lineHeight: 1.35, marginBottom: "0.6rem",
+                  }}>
+                    {heard.mandarin}
+                  </div>
+                  <div style={{ color:"#64748b", fontSize:"0.875rem", fontStyle:"italic", lineHeight:1.5 }}>
+                    {heard.english}
+                  </div>
+                </div>
+              ) : (
+                <div style={{ color:"#1e293b", fontSize:"0.8rem", marginTop:"0.5rem" }}>
+                  Waiting for speech…
+                </div>
+              )}
+            </div>
+
+            {/* YOU SAID */}
+            <div style={{
+              padding: "1.5rem",
+              display: "flex", flexDirection: "column", gap: "0.75rem",
+            }}>
+              <div style={{ fontSize:"0.6rem", letterSpacing:"0.2em", color:"#ef4444" }}>
+                ☠ YOU SAID (ALLEGEDLY)
+              </div>
+              {status === "processing" && !reply && (
+                <div style={{ color:"#78350f", fontSize:"0.85rem", animation:"breathe 1.5s ease infinite" }}>
+                  那个… cooking up a response…
+                </div>
+              )}
+              {reply && (
+                <div className="fade" key={reply.mangledPinyin}>
+                  <div style={{
+                    fontFamily: "'Noto Sans SC', sans-serif",
+                    fontSize: "2rem", lineHeight: 1.35, marginBottom: "0.4rem",
+                  }}>
+                    {reply.characters}
+                  </div>
+                  <div style={{ color:"#64748b", fontSize:"0.8rem", fontStyle:"italic", marginBottom:"0.75rem" }}>
+                    intended: {reply.intended_english}
+                  </div>
+                  <div style={{ display:"flex", flexWrap:"wrap", gap:"0.3rem" }}>
+                    {reply.scrambled.filter(s => s.pinyin_base).map((s, i) => (
+                      <span key={i} className="chip" style={{
+                        background: "#0d0a0a",
+                        border: `1px solid ${TONE_COLORS[s.newTone]}44`,
+                        borderRadius: "4px",
+                        padding: "0.2rem 0.45rem",
+                        fontSize: "0.8rem",
+                        color: TONE_COLORS[s.newTone],
+                        cursor: "default",
+                        transition: "filter 0.1s",
+                      }}>
+                        {applyTone(s.pinyin_base, s.newTone)}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {!reply && status !== "processing" && (
+                <div style={{ color:"#1e293b", fontSize:"0.8rem", marginTop:"0.5rem" }}>
+                  Response appears here…
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* History strip */}
+          {history.length > 0 && (
+            <div style={{
+              borderTop: "1px solid #0f1520",
+              padding: "0.75rem 1.5rem",
+              display: "flex", gap: "0.75rem",
+              overflowX: "auto",
+              background: "#07080f",
+            }}>
+              {[...history].reverse().map((h, i) => (
+                <div key={i} style={{
+                  flexShrink: 0,
+                  background: "#0d0f18",
+                  border: "1px solid #1e293b",
+                  borderRadius: "8px",
+                  padding: "0.6rem 0.8rem",
+                  maxWidth: 200,
+                  opacity: Math.max(0.2, 1 - i * 0.08),
+                }}>
+                  <div style={{
+                    fontFamily: "'Noto Sans SC', sans-serif", fontSize:"0.9rem",
+                    marginBottom:"0.2rem", whiteSpace:"nowrap",
+                    overflow:"hidden", textOverflow:"ellipsis",
+                  }}>
+                    {h.heard.mandarin}
+                  </div>
+                  <div style={{
+                    color:"#ef4444", fontSize:"0.7rem",
+                    whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis",
+                  }}>
+                    → {h.reply.mangledPinyin}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Footer */}
+          <div style={{
+            borderTop: "1px solid #0d0f14",
+            padding: "0.4rem 1.5rem",
+            display: "flex", gap: "1.5rem", alignItems: "center",
+            background: "#05060b",
+          }}>
+            {[1,2,3,4].map(t => (
+              <span key={t} style={{ fontSize:"0.6rem", color:TONE_COLORS[t], letterSpacing:"0.08em" }}>
+                ● {TONE_NAMES[t]}
+              </span>
+            ))}
+            <span style={{ marginLeft:"auto", fontSize:"0.6rem", color:"#1e293b", letterSpacing:"0.1em" }}>
+              ALL TONES WRONG. GUARANTEED.
+            </span>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<MandarinProxy />);
+  </script>
+</body>
+</html>
